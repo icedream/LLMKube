@@ -5,6 +5,14 @@ All notable changes to LLMKube will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.12](https://github.com/defilantech/LLMKube/compare/v0.10.11...v0.10.12) (2026-10-25)
+
+
+### Bug Fixes
+
+* **controller:** keep a ModelPool activation while its member is held at zero ([#2241](https://github.com/defilantech/LLMKube/issues/2241)) ([8fc4143](https://github.com/defilantech/LLMKube/commit/8fc4143afe54a8abbf9ab895d679b85600ea071c))
+* **router:** report moves off a quarantined pod as reason="quarantined" instead of reason="not_ready" ([faa7a5f](https://github.com/defilantech/LLMKube/commit/faa7a5fd83a72d2e5bae6741674fa421ced1fe50))
+
 ## [0.10.11](https://github.com/defilantech/LLMKube/compare/v0.10.10...v0.10.11) (2026-10-25)
 
 

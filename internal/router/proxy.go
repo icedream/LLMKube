@@ -41,6 +41,11 @@ type Proxy struct {
 	routerName string
 	activator  *Activator
 	budgets    *BudgetStore
+	// details caches what each local backend last reported about itself, so a
+	// backend whose modelDetails were never declared can still describe its
+	// context window and modalities on /v1/models. nil when no DetailsScraper
+	// is wired in; declared values publish with or without it.
+	details *detailsCache
 	// hasUSDBudget is set when any configured budget carries a dollar cap.
 	// It gates the residual no_pricing counter for a request served by an
 	// unpriced backend, a config that bypassed validation.
@@ -83,6 +88,19 @@ func WithRouterName(name string) ProxyOption {
 func WithActivator(a *Activator) ProxyOption {
 	return func(p *Proxy) { p.activator = a }
 }
+
+// WithDetailsCache points the model list at the cache a DetailsScraper keeps of
+// each backend's self-reported context window and modalities. A backend's
+// declared modelDetails stay authoritative; the cache only fills what they
+// leave unset, so a parked engine is still described.
+func WithDetailsCache(c *detailsCache) ProxyOption {
+	return func(p *Proxy) { p.details = c }
+}
+
+// SetDetailsCache attaches a details cache to an already-built proxy. The
+// scraper needs the proxy's Dispatcher, so it can only be constructed after
+// the proxy exists; WithDetailsCache serves a caller that has the cache first.
+func (p *Proxy) SetDetailsCache(c *detailsCache) { p.details = c }
 
 // NewProxy constructs a Proxy from a loaded Config.
 func NewProxy(cfg *Config, logger *slog.Logger, opts ...ProxyOption) *Proxy {
@@ -174,14 +192,8 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // Model field; local backends report their backend name. When a backend
 // has a DisplayName, that is published as the model id instead of Name.
 func (p *Proxy) handleModels(w http.ResponseWriter, _ *http.Request) {
-	type model struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		Created int64  `json:"created"`
-		OwnedBy string `json:"owned_by"`
-	}
 	now := time.Now().Unix()
-	models := make([]model, 0, len(p.cfg.Backends))
+	models := make([]modelEntry, 0, len(p.cfg.Backends))
 	for _, b := range p.cfg.Backends {
 		id := b.Name
 		if b.DisplayName != "" {
@@ -193,7 +205,12 @@ func (p *Proxy) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if b.Provider != "" {
 			owned = b.Provider
 		}
-		models = append(models, model{ID: id, Object: "model", Created: now, OwnedBy: owned})
+		var live discovered
+		hasLive := false
+		if p.details != nil {
+			live, hasLive = p.details.get(b.Name)
+		}
+		models = append(models, buildModelEntry(&b, id, owned, now, live, hasLive))
 	}
 	body, _ := json.Marshal(map[string]any{"object": "list", "data": models})
 	w.Header().Set("Content-Type", "application/json")

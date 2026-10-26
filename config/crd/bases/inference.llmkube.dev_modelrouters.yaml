@@ -250,7 +250,8 @@ spec:
                       description: |-
                         Capabilities advertised by this backend. Rules can require
                         capabilities (e.g. ["tools", "vision", "long-context"]) to filter
-                        candidates.
+                        candidates, and they are published on GET /v1/models so a client can
+                        see what a backend offers without trying it.
                       items:
                         type: string
                       type: array
@@ -406,6 +407,38 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    modelDetails:
+                      description: |-
+                        ModelDetails describes the model behind this backend on GET /v1/models:
+                        its context window and modalities. Clients read these to decide how much
+                        context to keep and whether an image may be sent, so they must be
+                        answerable while the engine is parked - a ModelPool member is not up
+                        when the model list is fetched. Declared values are authoritative; the
+                        proxy fills only what is left unset from what a running backend reports
+                        about itself. Not used for routing.
+                      properties:
+                        contextLength:
+                          description: |-
+                            ContextLength is the maximum prompt-plus-completion tokens the server
+                            holds for one request, the equivalent of llama.cpp's -c / vLLM's
+                            max_model_len.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        inputModalities:
+                          description: |-
+                            InputModalities lists what a request may carry, e.g. ["text","image"].
+                            A client offering picture input needs "image" here.
+                          items:
+                            type: string
+                          type: array
+                        outputModalities:
+                          description: OutputModalities lists what a response can
+                            carry, e.g. ["text"].
+                          items:
+                            type: string
+                          type: array
+                      type: object
                     name:
                       description: |-
                         Name is the stable identifier used by rules and observability labels.

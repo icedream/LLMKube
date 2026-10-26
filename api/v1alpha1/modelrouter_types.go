@@ -267,9 +267,20 @@ type RouterBackend struct {
 
 	// Capabilities advertised by this backend. Rules can require
 	// capabilities (e.g. ["tools", "vision", "long-context"]) to filter
-	// candidates.
+	// candidates, and they are published on GET /v1/models so a client can
+	// see what a backend offers without trying it.
 	// +optional
 	Capabilities []string `json:"capabilities,omitempty"`
+
+	// ModelDetails describes the model behind this backend on GET /v1/models:
+	// its context window and modalities. Clients read these to decide how much
+	// context to keep and whether an image may be sent, so they must be
+	// answerable while the engine is parked - a ModelPool member is not up
+	// when the model list is fetched. Declared values are authoritative; the
+	// proxy fills only what is left unset from what a running backend reports
+	// about itself. Not used for routing.
+	// +optional
+	ModelDetails *ModelDetails `json:"modelDetails,omitempty"`
 
 	// Weight is used for the "weighted" routing strategy. Higher values
 	// receive proportionally more traffic. Ignored for other strategies.
@@ -297,6 +308,27 @@ type RouterBackend struct {
 	// P99 envelopes (in-cluster vLLM vs Anthropic global LB).
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
+}
+
+// ModelDetails is the description of a backend's model published on
+// GET /v1/models, in the shapes OpenAI-compatible clients already look for
+// (meta.n_ctx, architecture.input_modalities). It carries no routing meaning.
+type ModelDetails struct {
+	// ContextLength is the maximum prompt-plus-completion tokens the server
+	// holds for one request, the equivalent of llama.cpp's -c / vLLM's
+	// max_model_len.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ContextLength *int32 `json:"contextLength,omitempty"`
+
+	// InputModalities lists what a request may carry, e.g. ["text","image"].
+	// A client offering picture input needs "image" here.
+	// +optional
+	InputModalities []string `json:"inputModalities,omitempty"`
+
+	// OutputModalities lists what a response can carry, e.g. ["text"].
+	// +optional
+	OutputModalities []string `json:"outputModalities,omitempty"`
 }
 
 // ExternalProvider describes an upstream LLM API outside the cluster.

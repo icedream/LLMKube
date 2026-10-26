@@ -185,6 +185,13 @@ func (r *ModelRouterReconciler) resolveBackend(
 		Tier:         b.Tier,
 		Capabilities: append([]string(nil), b.Capabilities...),
 	}
+	if b.ModelDetails != nil {
+		wire.ModelDetails = &router.ModelDetails{
+			ContextLength:    b.ModelDetails.ContextLength,
+			InputModalities:  append([]string(nil), b.ModelDetails.InputModalities...),
+			OutputModalities: append([]string(nil), b.ModelDetails.OutputModalities...),
+		}
+	}
 	if b.Weight != nil {
 		wire.Weight = int(*b.Weight)
 	}

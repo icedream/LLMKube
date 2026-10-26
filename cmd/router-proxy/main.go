@@ -172,6 +172,16 @@ func main() {
 		logger.Info("engine metrics scraper started")
 	}
 
+	// Ask each local backend what it serves, so /v1/models can report a context
+	// window and modalities for a model whose operator declared none. Declared
+	// modelDetails win, and a parked engine has nothing to add - which is why
+	// the list never waits for one.
+	if scraper, cache := router.NewDetailsScraper(cfg, proxy.Dispatcher(), logger); scraper.HasTargets() {
+		proxy.SetDetailsCache(cache)
+		go scraper.Start(baseCtx)
+		logger.Info("model details scraper started")
+	}
+
 	// LoadAware backends: release prefill counts whose response never started.
 	if cfg.HasLoadAware() {
 		go proxy.Dispatcher().RunPrefillJanitor(baseCtx, 30*time.Second)

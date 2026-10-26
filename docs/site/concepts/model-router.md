@@ -177,8 +177,40 @@ Point any OpenAI-compatible client at that URL and it just works. The proxy serv
 
 The two Anthropic routes are placed, balanced and session-bound exactly like chat completions, and headers such as `anthropic-version` and `anthropic-beta` pass through. The backend must serve them itself: vLLM does natively; a backend that does not returns its own `404`, which reaches the client unchanged and does not count against the backend. Token budgets charge Anthropic responses from their own usage fields (cached input included), and errors the router itself returns on these routes use the Anthropic error shape.
 
-Headers that change routing:
+### What `GET /v1/models` reports
 
+Every entry carries the four OpenAI fields, plus `capabilities` and, when they are known, the
+model's context window and modalities:
+
+```yaml
+  backends:
+    - name: local-qwen
+      tier: local
+      inferenceServiceRef:
+        name: qwen3-coder
+      capabilities: ["long-context", "vision", "tools"]
+      modelDetails:
+        contextLength: 393216
+        inputModalities: ["text", "image"]
+        outputModalities: ["text"]
+```
+
+A client then sees:
+
+```json
+{"id": "qwen3-coder", "object": "model", "created": 1792980321, "owned_by": "llmkube",
+ "capabilities": ["long-context", "vision", "tools"],
+ "meta": {"n_ctx": 393216},
+ "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]}}
+```
+
+`capabilities` is the list `requiredCapabilities` matches against; publishing it changes no routing. `modelDetails` has no routing effect either.
+
+Two things fill those fields. What you declare under `modelDetails` is authoritative, and it answers while the backend is asleep, which is where a `ModelPool` member sits when a client reads the list. Separately, the proxy polls each local backend's own `/v1/models` once a minute and takes only the fields you left unset: `meta.n_ctx` from llama.cpp and Strata, `max_model_len` from vLLM. A self-report stops being served 30 minutes after the last successful poll, since an engine that stopped answering may have been replaced by one configured differently. Cloud backends are not polled, and a parked one is listed by name alone.
+
+Clients use these fields to decide how much context to keep before compacting and whether an image may be sent. A listing without them loses both.
+
+Headers that change routing:
 | Header | Effect |
 |---|---|
 | `x-llmkube-classification: pii` | Matches `pii-stays-local` rule; local-only, fail-closed. |

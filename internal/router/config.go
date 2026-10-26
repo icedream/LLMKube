@@ -137,8 +137,15 @@ type Backend struct {
 	InferenceService string `json:"inferenceService,omitempty"`
 
 	// Capabilities advertised by this backend (e.g. ["tools", "vision"]).
-	// Rules can require capabilities to filter candidates.
+	// Rules can require capabilities to filter candidates; they are also
+	// published on GET /v1/models.
 	Capabilities []string `json:"capabilities,omitempty"`
+
+	// ModelDetails is the declared description of this backend's model,
+	// published on GET /v1/models (context window, modalities). Declared values
+	// win; the proxy fills only the fields left unset from what a running
+	// backend reports about itself, so a parked engine still describes itself.
+	ModelDetails *ModelDetails `json:"modelDetails,omitempty"`
 
 	// Weight informs the "weighted" routing strategy (#432). Currently
 	// unused; the MVP strategy is primary-fallback.

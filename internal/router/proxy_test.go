@@ -298,6 +298,67 @@ func TestProxyMountsRerank(t *testing.T) {
 	}
 }
 
+// TestProxyMountsAudioSpeech verifies the proxy fronts POST /v1/audio/speech,
+// forwards it at that path, and copies a non-JSON body through byte for byte.
+// The upstream Content-Length goes with the other hop-by-hop headers, so the
+// caller gets a re-framed body: audio clients that read a duration off the
+// header need the engine's own metadata instead.
+func TestProxyMountsAudioSpeech(t *testing.T) {
+	h := newProxyHarness(t)
+	// Not text on purpose: the handler buffers and JSON-reads the request, but
+	// it must treat the response as opaque.
+	body := strings.Repeat("RIFF\x00\x01\x02\x03WAVEfmt ", 5000)
+	h.localBack.body.Store(&body)
+
+	resp := h.postPath(t, "/v1/audio/speech", map[string]any{
+		"model": "qwen3-coder",
+		"voice": "Sam",
+		"input": "hello",
+	})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/audio/speech = %d, want 200", resp.StatusCode)
+	}
+	if got := h.localBack.LastPath(); got != "/v1/audio/speech" {
+		t.Errorf("upstream path = %q, want /v1/audio/speech", got)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("body came back as %d bytes, want the %d the backend sent", len(got), len(body))
+	}
+	if resp.ContentLength >= 0 {
+		t.Errorf("Content-Length = %d: the proxy forwards the body re-framed, because it drops the upstream length with the other hop-by-hop headers", resp.ContentLength)
+	}
+}
+
+// TestBusyStatusKeepsBackendHealthy: a 429 from a backend leaves it in
+// rotation, a 5xx quarantines it.
+func TestBusyStatusKeepsBackendHealthy(t *testing.T) {
+	h := newProxyHarness(t)
+
+	busy := `{"error":{"message":"in-flight handle cap reached","type":"rate_limit_error","code":"busy"}}`
+	h.localBack.body.Store(&busy)
+	h.localBack.status.Store(http.StatusTooManyRequests)
+	resp := h.postPath(t, "/v1/audio/speech", map[string]any{"model": "qwen3-coder", "input": "hi"})
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("upstream 429 arrived as %d, want it forwarded", resp.StatusCode)
+	}
+	if !h.proxy.disp.IsHealthy("local-qwen") {
+		t.Fatal("a 429 quarantined the backend")
+	}
+
+	h.localBack.status.Store(http.StatusServiceUnavailable)
+	resp = h.postPath(t, "/v1/audio/speech", map[string]any{"model": "qwen3-coder", "input": "hi"})
+	_ = resp.Body.Close()
+	if h.proxy.disp.IsHealthy("local-qwen") {
+		t.Fatal("a 503 left the backend healthy")
+	}
+}
+
 // TestProxyMountsCompletions verifies the proxy fronts POST /v1/completions
 // (the legacy completions endpoint IDE autocomplete / FIM clients and
 // benchmark tools send raw prompts to), forwards the body unchanged to the

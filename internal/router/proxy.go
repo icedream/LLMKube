@@ -174,6 +174,9 @@ func (p *Proxy) Mount(mux *http.ServeMux) {
 	// completions does, so the same handler places and streams it.
 	mux.HandleFunc("POST /v1/messages", p.handleCompletion("/v1/messages"))
 	mux.HandleFunc("POST /v1/messages/count_tokens", p.handleCompletion("/v1/messages/count_tokens"))
+	// Text-to-speech carries "model" where the matcher already reads it, and its
+	// response is a binary body the copy path passes through unchanged.
+	mux.HandleFunc("POST /v1/audio/speech", p.handleCompletion("/v1/audio/speech"))
 	mux.HandleFunc("GET /v1/models", p.handleModels)
 	mux.HandleFunc("GET /health", p.handleHealth)
 	mux.HandleFunc("GET /healthz", p.handleHealth)

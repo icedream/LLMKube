@@ -171,11 +171,18 @@ Point any OpenAI-compatible client at that URL and it just works. The proxy serv
 | `POST /v1/completions` | Legacy completions: what fill-in-the-middle / IDE autocomplete clients and benchmark tools such as `vllm bench serve --backend openai` send |
 | `POST /v1/embeddings` | Embeddings |
 | `POST /v1/rerank` | Reranking |
+| `POST /v1/audio/speech` | Text to speech: the OpenAI TTS shape, `model` selects the engine and `voice` is forwarded untouched |
 | `POST /v1/messages` | Anthropic Messages API: Claude Code and the Anthropic SDKs |
 | `POST /v1/messages/count_tokens` | Anthropic token counting |
 | `GET /v1/models` | Model discovery |
 
 The two Anthropic routes are placed, balanced and session-bound exactly like chat completions, and headers such as `anthropic-version` and `anthropic-beta` pass through. The backend must serve them itself: vLLM does natively; a backend that does not returns its own `404`, which reaches the client unchanged and does not count against the backend. Token budgets charge Anthropic responses from their own usage fields (cached input included), and errors the router itself returns on these routes use the Anthropic error shape.
+
+The audio route carries `model` in the same place, so rules match it the same way, but the response is
+a binary body: the proxy copies it without parsing, and a route fronted by a token budget charges
+nothing and records it as uncharged, so leave budgets unset on a router that fronts speech. The
+upstream `Content-Length` goes with the hop-by-hop headers and the body arrives re-framed, so a client
+that wants a duration should read the engine's own metadata header.
 
 ### What `GET /v1/models` reports
 

@@ -287,15 +287,29 @@ func (r *ModelPoolReconciler) resolveMembers(ctx context.Context, pool *inferenc
 // are gone), which would erase the activation signal. The in-progress owner is
 // therefore remembered in status.PendingMember and honored here even while it is
 // held at zero, so a deferred swap does not revert to the incumbent.
+//
+// A member parked by spec.suspend is never a candidate in any branch: it can
+// never report Ready, so selecting one would leave the swap unfinished forever.
 func resolveSlotOwner(pool *inferencev1alpha1.ModelPool, members map[string]*inferencev1alpha1.InferenceService) string {
 	resident := pool.Status.ResidentMember
 	pending := pool.Status.PendingMember
 
-	// requested = members currently scaled up, in declaration order.
+	// A recorded resident that no longer resolves, or that is suspended, cannot
+	// hold the slot, so treat it as absent: keeping it would make this function
+	// return the stale resident and shadow the spec.default fallback below. The
+	// recorded value itself is left for updateStatus, which clears it when the
+	// pool goes cold and overwrites it once the new owner is Ready.
+	if isvc, ok := members[resident]; resident != "" && (!ok || memberSuspended(isvc)) {
+		resident = ""
+	}
+
+	// requested = members currently scaled up, in declaration order. A suspended
+	// member is skipped even if it still carries replicas: its own controller
+	// keeps the workload at zero, so spec.replicas here is not an activation.
 	var requested []string
 	for _, m := range pool.Spec.Members {
 		name := m.InferenceServiceRef.Name
-		if isvc, ok := members[name]; ok && replicasOf(isvc) >= 1 {
+		if isvc, ok := members[name]; ok && replicasOf(isvc) >= 1 && !memberSuspended(isvc) {
 			requested = append(requested, name)
 		}
 	}
@@ -313,19 +327,21 @@ func resolveSlotOwner(pool *inferencev1alpha1.ModelPool, members map[string]*inf
 		// Continue an in-progress swap first, then honor a fresh activation,
 		// then spec.default, then declaration order, else stay cold.
 		if pending != "" {
-			if _, ok := members[pending]; ok {
+			if isvc, ok := members[pending]; ok && !memberSuspended(isvc) {
 				return pending
 			}
 		}
 		if len(requested) == 0 {
 			if def := pool.Spec.Default; def != "" {
-				if _, ok := members[def]; ok {
+				if isvc, ok := members[def]; ok && !memberSuspended(isvc) {
 					return def
 				}
 			}
 			return ""
 		}
 		if def := pool.Spec.Default; def != "" {
+			// requested is already filtered to members that resolve and are not
+			// suspended, so a default found in it is a valid owner.
 			for _, name := range requested {
 				if name == def {
 					return def
@@ -339,7 +355,8 @@ func resolveSlotOwner(pool *inferencev1alpha1.ModelPool, members map[string]*inf
 	if len(newly) > 0 {
 		// A fresh activation supersedes. Prefer the in-progress pending swap
 		// when it is still among the scaled-up members, else the first newly
-		// activated member.
+		// activated member. Both candidates come from newly, which never holds a
+		// suspended member.
 		if pending != "" {
 			for _, name := range newly {
 				if name == pending {
@@ -350,9 +367,11 @@ func resolveSlotOwner(pool *inferencev1alpha1.ModelPool, members map[string]*inf
 		return newly[0]
 	}
 	// No fresh activation. Continue an in-progress swap (the pending owner is
-	// held at zero during the incumbent drain), else keep the resident.
+	// held at zero during the incumbent drain), else keep the resident. A
+	// suspended pending owner is dropped here, which lets the incumbent keep the
+	// slot instead of being drained for a member that cannot load.
 	if pending != "" {
-		if _, ok := members[pending]; ok {
+		if isvc, ok := members[pending]; ok && !memberSuspended(isvc) {
 			return pending
 		}
 	}
@@ -795,4 +814,14 @@ func replicasOf(isvc *inferencev1alpha1.InferenceService) int32 {
 // memberReady reports whether a member InferenceService is serving.
 func memberReady(isvc *inferencev1alpha1.InferenceService) bool {
 	return isvc != nil && isvc.Status.Phase == PhaseReady
+}
+
+// memberSuspended reports whether a member is parked by spec.suspend. The
+// InferenceService controller keeps a suspended member's workload at zero
+// replicas whatever the pool writes to spec.replicas, so a suspended member can
+// never become resident. Selecting one as the slot owner wedges the pool in
+// Swapping: the incumbent is already drained, the target never reports Ready,
+// and every request against the pool burns its full swapBudget.
+func memberSuspended(isvc *inferencev1alpha1.InferenceService) bool {
+	return isvc != nil && isvc.Spec.Suspend
 }

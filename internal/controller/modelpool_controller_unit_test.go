@@ -47,12 +47,29 @@ func membersMap(scaled map[string]int32) map[string]*inferencev1alpha1.Inference
 	return m
 }
 
+// membersSuspended builds the member set of membersMap and parks the named
+// members with spec.suspend. A member listed only in suspended is present with
+// zero replicas.
+func membersSuspended(scaled map[string]int32, suspended []string) map[string]*inferencev1alpha1.InferenceService {
+	m := membersMap(scaled)
+	for _, name := range suspended {
+		isvc, ok := m[name]
+		if !ok {
+			isvc = isvcReplicas(0)
+			m[name] = isvc
+		}
+		isvc.Spec.Suspend = true
+	}
+	return m
+}
+
 func TestResolveSlotOwner(t *testing.T) {
 	tests := []struct {
-		name    string
-		pool    *inferencev1alpha1.ModelPool
-		members map[string]int32
-		want    string
+		name      string
+		pool      *inferencev1alpha1.ModelPool
+		members   map[string]int32
+		suspended []string
+		want      string
 	}{
 		{
 			name:    "cold pool, nothing scaled, spec.default warms",
@@ -108,10 +125,45 @@ func TestResolveSlotOwner(t *testing.T) {
 			members: map[string]int32{"coder": 1, "judge": 0},
 			want:    "coder",
 		},
+		{
+			name:      "warm pool, suspended activation does not displace resident",
+			pool:      mpoolFor("coder", "", "", "coder", "judge"),
+			members:   map[string]int32{"coder": 1, "judge": 1},
+			suspended: []string{"judge"},
+			want:      "coder",
+		},
+		{
+			name:      "warm pool, suspended pending swap is ignored",
+			pool:      mpoolFor("coder", "judge", "", "coder", "judge"),
+			members:   map[string]int32{"coder": 1, "judge": 0},
+			suspended: []string{"judge"},
+			want:      "coder",
+		},
+		{
+			name:      "warm pool, suspended resident falls back to default",
+			pool:      mpoolFor("coder", "", "judge", "coder", "judge"),
+			members:   map[string]int32{"coder": 0, "judge": 0},
+			suspended: []string{"coder"},
+			want:      "judge",
+		},
+		{
+			name:      "cold pool, suspended default stays cold",
+			pool:      mpoolFor("", "", "coder", "coder", "judge"),
+			members:   map[string]int32{"coder": 0, "judge": 0},
+			suspended: []string{"coder"},
+			want:      "",
+		},
+		{
+			name:      "cold pool, suspended pending does not block a fresh activation",
+			pool:      mpoolFor("", "coder", "", "coder", "judge"),
+			members:   map[string]int32{"coder": 0, "judge": 1},
+			suspended: []string{"coder"},
+			want:      "judge",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveSlotOwner(tc.pool, membersMap(tc.members))
+			got := resolveSlotOwner(tc.pool, membersSuspended(tc.members, tc.suspended))
 			if got != tc.want {
 				t.Errorf("resolveSlotOwner = %q, want %q", got, tc.want)
 			}
@@ -144,6 +196,20 @@ func TestMemberReady(t *testing.T) {
 	ready.Status.Phase = PhaseReady
 	if !memberReady(ready) {
 		t.Error("memberReady(Ready) = false, want true")
+	}
+}
+
+func TestMemberSuspended(t *testing.T) {
+	if memberSuspended(nil) {
+		t.Error("memberSuspended(nil) = true, want false")
+	}
+	suspended := isvcReplicas(1)
+	suspended.Spec.Suspend = true
+	if !memberSuspended(suspended) {
+		t.Error("memberSuspended(suspend=true) = false, want true")
+	}
+	if memberSuspended(isvcReplicas(1)) {
+		t.Error("memberSuspended(suspend unset) = true, want false")
 	}
 }
 

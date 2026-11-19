@@ -61,6 +61,12 @@ func fullyPopulatedModelRouter() *ModelRouter {
 						IntervalSeconds: 10,
 						TimeoutSeconds:  2,
 					},
+					ModelDetails: &ModelDetails{
+						ContextLength:    ptrInt32(393216),
+						InputModalities:  []string{"text", "image"},
+						OutputModalities: []string{"text"},
+						ReasoningLevels:  []string{"none", "low", "medium", "xhigh"},
+					},
 				},
 				{
 					Name: "cloud-opus",
@@ -216,12 +222,16 @@ func TestModelRouterDeepCopyIndependence(t *testing.T) {
 	// Mutate maps and pointer fields on the clone.
 	clone.Spec.Rules[1].Match.Headers["x-team"] = testMutationMarker
 	*clone.Spec.Backends[0].Weight = 0
+	clone.Spec.Backends[0].ModelDetails.ReasoningLevels[0] = testMutationMarker
 
 	if got := orig.Spec.Rules[1].Match.Headers["x-team"]; got != "research" {
 		t.Errorf("original Spec.Rules[1].Match.Headers[x-team] = %q; want %q", got, "research")
 	}
 	if got := *orig.Spec.Backends[0].Weight; got != 80 {
 		t.Errorf("original Spec.Backends[0].Weight = %d; want 80", got)
+	}
+	if got := orig.Spec.Backends[0].ModelDetails.ReasoningLevels[0]; got != "none" {
+		t.Errorf("original Spec.Backends[0].ModelDetails.ReasoningLevels[0] = %q; want %q", got, "none")
 	}
 }
 
@@ -359,6 +369,34 @@ func TestPolicyOmitemptyShape(t *testing.T) {
 	}
 	if _, ok := jsonHasKey(data, "endpoint"); ok {
 		t.Errorf("ModelRouterSpec emitted \"endpoint\" key when Endpoint was nil: %s", data)
+	}
+}
+
+// TestModelDetailsReasoningLevelsShape pins the CRD field name the router
+// manifests write, and that a backend declaring no levels stays off the wire.
+func TestModelDetailsReasoningLevelsShape(t *testing.T) {
+	data, err := json.Marshal(ModelDetails{ReasoningLevels: []string{"none", "low", "medium", "xhigh"}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, ok := jsonHasKey(data, "reasoningLevels")
+	if !ok {
+		t.Fatalf("ModelDetails did not emit \"reasoningLevels\": %s", data)
+	}
+	var levels []string
+	if err := json.Unmarshal(got, &levels); err != nil {
+		t.Fatalf("decode reasoningLevels %s: %v", got, err)
+	}
+	if !reflect.DeepEqual(levels, []string{"none", "low", "medium", "xhigh"}) {
+		t.Errorf("reasoningLevels = %v, want the four declared levels", levels)
+	}
+
+	empty, err := json.Marshal(ModelDetails{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if _, ok := jsonHasKey(empty, "reasoningLevels"); ok {
+		t.Errorf("ModelDetails with no levels emitted \"reasoningLevels\": %s", empty)
 	}
 }
 

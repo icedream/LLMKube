@@ -438,6 +438,14 @@ spec:
                           items:
                             type: string
                           type: array
+                        reasoningLevels:
+                          description: |-
+                            ReasoningLevels lists the thinking levels the backend accepts, in the
+                            endpoint's own vocabulary, e.g. ["none","low","medium","xhigh"]. Empty
+                            when it declares none.
+                          items:
+                            type: string
+                          type: array
                       type: object
                     name:
                       description: |-

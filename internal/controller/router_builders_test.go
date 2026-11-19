@@ -124,6 +124,55 @@ func newRouterReconcilerForTest(t *testing.T, mr *inferencev1alpha1.ModelRouter,
 	}
 }
 
+// Declared model details reach the proxy config intact, thinking levels
+// included: the proxy publishes them for a pooled member that is parked and so
+// cannot describe itself.
+func TestCompileRouterConfigCopiesModelDetails(t *testing.T) {
+	mr := canonicalModelRouter()
+	mr.Spec.Backends[0].ModelDetails = &inferencev1alpha1.ModelDetails{
+		ContextLength:    ptrInt32B(393216),
+		InputModalities:  []string{"text", "image"},
+		OutputModalities: []string{"text"},
+		ReasoningLevels:  []string{"none", "low", "medium", "xhigh"},
+	}
+	isvc := &inferencev1alpha1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen3-coder", Namespace: testBuilderNs},
+		Spec:       inferencev1alpha1.InferenceServiceSpec{ModelRef: "qwen3-coder"},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-key", Namespace: testBuilderNs},
+		Data:       map[string][]byte{"ANTHROPIC_API_KEY": []byte("test")},
+	}
+	r := newRouterReconcilerForTest(t, mr, isvc, secret)
+
+	compiled, err := r.compileRouterConfig(context.Background(), mr)
+	if err != nil {
+		t.Fatalf("compileRouterConfig: %v", err)
+	}
+	var cfg router.Config
+	if err := json.Unmarshal(compiled.JSON, &cfg); err != nil {
+		t.Fatalf("unmarshal compiled JSON: %v", err)
+	}
+
+	md := cfg.Backends[0].ModelDetails
+	if md == nil {
+		t.Fatal("local backend carries no modelDetails into the proxy config")
+	}
+	if md.ContextLength == nil || *md.ContextLength != 393216 {
+		t.Errorf("contextLength = %v, want 393216", md.ContextLength)
+	}
+	if !reflect.DeepEqual(md.InputModalities, []string{"text", "image"}) ||
+		!reflect.DeepEqual(md.OutputModalities, []string{"text"}) {
+		t.Errorf("modalities = %v / %v, want [text image] / [text]", md.InputModalities, md.OutputModalities)
+	}
+	if !reflect.DeepEqual(md.ReasoningLevels, []string{"none", "low", "medium", "xhigh"}) {
+		t.Errorf("reasoningLevels = %v, want the declared four levels", md.ReasoningLevels)
+	}
+	if other := cfg.Backends[1].ModelDetails; other != nil {
+		t.Errorf("cloud backend carries modelDetails %v, want none (nothing declared)", other)
+	}
+}
+
 // TestCompileRouterConfigResolvesLocalBackend verifies that a local
 // InferenceServiceRef resolves to the expected in-cluster URL.
 func TestCompileRouterConfigResolvesLocalBackend(t *testing.T) {

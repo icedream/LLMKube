@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 )
@@ -55,6 +56,39 @@ func entryByID(data []map[string]any, id string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// stringList reads a JSON array of strings out of a published entry; nil when
+// the field is absent.
+func stringList(v any) []string {
+	raw, _ := v.([]any)
+	if raw == nil {
+		return nil
+	}
+	out := make([]string, len(raw))
+	for i, e := range raw {
+		s, ok := e.(string)
+		if !ok {
+			return nil
+		}
+		out[i] = s
+	}
+	return out
+}
+
+// publishedLevels reads params.reasoning.supported out of a published entry;
+// nil when the entry names no levels.
+func publishedLevels(t *testing.T, entry map[string]any) []string {
+	t.Helper()
+	params, _ := entry["params"].(map[string]any)
+	if params == nil {
+		return nil
+	}
+	block, ok := params["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("params = %v, want a reasoning block", params)
+	}
+	return stringList(block["supported"])
 }
 
 // A parked engine must still describe itself: what an operator declares is
@@ -141,6 +175,111 @@ func TestProxyModelsDeclaredWinOverDiscovered(t *testing.T) {
 	}
 }
 
+// Thinking levels reach the model list from either side: an operator declares
+// them so a parked member still answers, a running engine reports its own
+// vocabulary, and the declaration wins when both exist. With neither the proxy
+// names no levels rather than guessing a vocabulary the engine may reject.
+func TestProxyModelsPublishReasoningLevels(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared []string
+		live     *discovered
+		want     []string
+	}{
+		{
+			name:     "declared only",
+			declared: []string{"none", "low", "medium", "xhigh"},
+			want:     []string{"none", "low", "medium", "xhigh"},
+		},
+		{
+			name: "discovered only",
+			live: &discovered{ReasoningLevels: []string{"none", "low", "medium", "xhigh"}},
+			want: []string{"none", "low", "medium", "xhigh"},
+		},
+		{
+			name:     "declared and discovered",
+			declared: []string{"none", "low", "medium", "xhigh"},
+			live:     &discovered{ReasoningLevels: []string{"low", "high"}},
+			want:     []string{"none", "low", "medium", "xhigh"},
+		},
+		{name: "neither"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newProxyHarness(t)
+			if tc.declared != nil {
+				h.cfg.Backends[0].ModelDetails = &ModelDetails{ReasoningLevels: tc.declared}
+			}
+			if tc.live != nil {
+				cache := newDetailsCache()
+				tc.live.At = cache.nowF()
+				cache.store("local-qwen", *tc.live)
+				h.proxy.SetDetailsCache(cache)
+			}
+
+			data := modelsList(t, h)
+			entry := entryByID(data, "local-qwen")
+			if entry == nil {
+				t.Fatal("local-qwen missing from /v1/models")
+			}
+			if got := publishedLevels(t, entry); !slices.Equal(got, tc.want) {
+				t.Errorf("params.reasoning.supported = %v, want %v", got, tc.want)
+			}
+			wantCaps := []string{"reasoning"}
+			if len(tc.want) == 0 {
+				wantCaps = nil
+			}
+			if got := stringList(entry["capabilities"]); !slices.Equal(got, wantCaps) {
+				t.Errorf("capabilities = %v, want %v", got, wantCaps)
+			}
+			// The description is keyed per backend: the other one has nothing
+			// declared and nothing discovered, so it stays bare. A cloud backend
+			// publishes its upstream model id, not its backend name.
+			other := entryByID(data, "claude-opus-4-7")
+			if other == nil {
+				t.Fatal("claude-opus-4-7 missing from /v1/models")
+			}
+			if publishedLevels(t, other) != nil || stringList(other["capabilities"]) != nil {
+				t.Errorf("claude-opus-4-7 described as %v, want no reasoning block and no capabilities", other)
+			}
+		})
+	}
+}
+
+// A level list never replaces the capabilities an operator declared; it adds to
+// them, so a rule matching on "vision" keeps seeing it.
+func TestProxyModelsReasoningLevelsAddToDeclaredCapabilities(t *testing.T) {
+	h := newProxyHarness(t)
+	h.cfg.Backends[0].Capabilities = []string{"long-context", "vision"}
+	h.cfg.Backends[0].ModelDetails = &ModelDetails{ReasoningLevels: []string{"none", "low"}}
+
+	entry := entryByID(modelsList(t, h), "local-qwen")
+	if got := stringList(entry["capabilities"]); !slices.Equal(got, []string{"long-context", "vision", "reasoning"}) {
+		t.Errorf("capabilities = %v, want the declared two plus reasoning", got)
+	}
+	if got := publishedLevels(t, entry); !slices.Equal(got, []string{"none", "low"}) {
+		t.Errorf("params.reasoning.supported = %v, want the declared two", got)
+	}
+}
+
+// An engine that advertises the reasoning capability without naming levels is
+// published as supported with no names: the vocabulary stays the engine's.
+func TestProxyModelsReasoningCapabilityWithoutLevels(t *testing.T) {
+	h := newProxyHarness(t)
+	h.cfg.Backends[0].Capabilities = []string{"tools"}
+	cache := newDetailsCache()
+	cache.store("local-qwen", discovered{ReasoningCapability: true, At: cache.nowF()})
+	h.proxy.SetDetailsCache(cache)
+
+	entry := entryByID(modelsList(t, h), "local-qwen")
+	if got := stringList(entry["capabilities"]); !slices.Equal(got, []string{"tools", "reasoning"}) {
+		t.Errorf("capabilities = %v, want the declared one plus reasoning", got)
+	}
+	if _, ok := entry["params"]; ok {
+		t.Errorf("params published for an engine that named no levels: %v", entry["params"])
+	}
+}
+
 // A self-report stops being usable once the engine has been silent long enough
 // that it could have been replaced by one configured differently.
 func TestDiscoveredDetailsExpire(t *testing.T) {
@@ -152,8 +291,9 @@ func TestDiscoveredDetailsExpire(t *testing.T) {
 }
 
 // strataListing is what a running Strata answers on /v1/models: the id, its
-// alias, the context window under meta.n_ctx, and the modalities.
-const strataListing = `{"object":"list","data":[{"id":"qwen3.8-flash-next-iq3_s","object":"model","status":{"value":"loaded"},"meta":{"n_ctx":393216},"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"aliases":["qfn-alias"]},{"id":"qfn-alias","object":"model","alias_of":"qwen3.8-flash-next-iq3_s"}]}`
+// alias, the context window under meta.n_ctx, the modalities, and the thinking
+// levels it accepts under params.reasoning.supported.
+const strataListing = `{"object":"list","data":[{"id":"qwen3.8-flash-next-iq3_s","object":"model","status":{"value":"loaded"},"meta":{"n_ctx":393216},"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"capabilities":["long-context","vision","tools","reasoning"],"params":{"reasoning":{"supported":["none","low","medium","xhigh"]}},"aliases":["qfn-alias"]},{"id":"qfn-alias","object":"model","alias_of":"qwen3.8-flash-next-iq3_s"}]}`
 
 func TestDetailsScraperRecordsSelfReport(t *testing.T) {
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -182,6 +322,59 @@ func TestDetailsScraperRecordsSelfReport(t *testing.T) {
 	}
 	if len(d.InputModalities) != 2 || d.InputModalities[1] != "image" {
 		t.Errorf("input modalities = %v, want text and image", d.InputModalities)
+	}
+	if !slices.Equal(d.ReasoningLevels, []string{"none", "low", "medium", "xhigh"}) {
+		t.Errorf("reasoning levels = %v, want the engine's own four", d.ReasoningLevels)
+	}
+	if !d.ReasoningCapability {
+		t.Error("the engine listed the reasoning capability and it was not recorded")
+	}
+}
+
+// Reasoning is a description of a model on its own: a backend that reports
+// nothing else than its thinking vocabulary, or only the capability without
+// naming levels, is still worth recording. The poller does not invent a
+// vocabulary for an engine that named none.
+func TestDetailsScraperRecordsReasoningOnlyReport(t *testing.T) {
+	cases := []struct {
+		name         string
+		listing      string
+		wantLevels   []string
+		wantCapsFlag bool
+	}{
+		{
+			name:       "levels only",
+			listing:    `{"object":"list","data":[{"id":"svc","object":"model","params":{"reasoning":{"supported":["none","low","medium","xhigh"]}}}]}`,
+			wantLevels: []string{"none", "low", "medium", "xhigh"},
+		},
+		{
+			name:         "capability without levels",
+			listing:      `{"object":"list","data":[{"id":"svc","object":"model","capabilities":["reasoning"]}]}`,
+			wantCapsFlag: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.listing))
+			}))
+			defer engine.Close()
+
+			cfg := &Config{Backends: []Backend{{Name: "svc", Tier: "local", Address: engine.URL, ServedModel: "svc"}}}
+			scraper, cache := NewDetailsScraper(cfg, NewDispatcher(cfg), slog.Default())
+			scraper.pollOnce(context.Background())
+
+			d, ok := cache.get("svc")
+			if !ok {
+				t.Fatal("a backend that reported only reasoning was recorded as reporting nothing")
+			}
+			if !slices.Equal(d.ReasoningLevels, tc.wantLevels) {
+				t.Errorf("reasoning levels = %v, want %v", d.ReasoningLevels, tc.wantLevels)
+			}
+			if d.ReasoningCapability != tc.wantCapsFlag {
+				t.Errorf("reasoning capability = %v, want %v", d.ReasoningCapability, tc.wantCapsFlag)
+			}
+		})
 	}
 }
 

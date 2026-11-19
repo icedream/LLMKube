@@ -190,6 +190,7 @@ func (r *ModelRouterReconciler) resolveBackend(
 			ContextLength:    b.ModelDetails.ContextLength,
 			InputModalities:  append([]string(nil), b.ModelDetails.InputModalities...),
 			OutputModalities: append([]string(nil), b.ModelDetails.OutputModalities...),
+			ReasoningLevels:  append([]string(nil), b.ModelDetails.ReasoningLevels...),
 		}
 	}
 	if b.Weight != nil {

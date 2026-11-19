@@ -28,13 +28,18 @@ import (
 
 // ModelDetails is the declared description of a backend's model, mirrored from
 // api/v1alpha1.ModelDetails by the controller's router config builder. It is
-// what a client needs to plan around a model: how much context it holds, and
-// which modalities it accepts and produces.
+// what a client needs to plan around a model: how much context it holds, which
+// modalities it accepts and produces, and which thinking levels it takes.
 type ModelDetails struct {
 	ContextLength    *int32   `json:"contextLength,omitempty"`
 	InputModalities  []string `json:"inputModalities,omitempty"`
 	OutputModalities []string `json:"outputModalities,omitempty"`
+	ReasoningLevels  []string `json:"reasoningLevels,omitempty"`
 }
+
+// reasoningCapability is the capability name a client looks for to learn a
+// model takes a thinking level. Declaring levels implies it.
+const reasoningCapability = "reasoning"
 
 const (
 	// detailsInterval is how often the details scraper asks a local backend
@@ -57,7 +62,13 @@ type discovered struct {
 	ContextLength    int32
 	InputModalities  []string
 	OutputModalities []string
-	At               time.Time
+	// ReasoningLevels names the thinking levels the backend accepts, in its
+	// own vocabulary. ReasoningCapability without levels means the backend
+	// thinks but named none: the proxy publishes the capability and no names
+	// rather than inventing a vocabulary for it.
+	ReasoningLevels     []string
+	ReasoningCapability bool
+	At                  time.Time
 }
 
 // detailsCache holds the last self-report of each backend, keyed by backend
@@ -196,7 +207,17 @@ func (s *DetailsScraper) poll(ctx context.Context, b *Backend) (discovered, bool
 	}
 	d.InputModalities = append([]string(nil), entry.Architecture.InputModalities...)
 	d.OutputModalities = append([]string(nil), entry.Architecture.OutputModalities...)
-	if d.ContextLength == 0 && len(d.InputModalities) == 0 && len(d.OutputModalities) == 0 {
+	if entry.Params.Reasoning != nil {
+		d.ReasoningLevels = append([]string(nil), entry.Params.Reasoning.Supported...)
+	}
+	for _, c := range entry.Capabilities {
+		if c == reasoningCapability {
+			d.ReasoningCapability = true
+			break
+		}
+	}
+	if d.ContextLength == 0 && len(d.InputModalities) == 0 && len(d.OutputModalities) == 0 &&
+		len(d.ReasoningLevels) == 0 && !d.ReasoningCapability {
 		return discovered{}, false
 	}
 	return d, true
@@ -204,8 +225,9 @@ func (s *DetailsScraper) poll(ctx context.Context, b *Backend) (discovered, bool
 
 // detailsEntry is one item of a backend's /v1/models listing, as far as the
 // details poller cares. The spellings differ per engine: llama.cpp and Strata
-// report meta.n_ctx, vLLM reports max_model_len, and the architecture block is
-// the OpenAI one.
+// report meta.n_ctx, vLLM reports max_model_len, the architecture block is the
+// OpenAI one, and params.reasoning.supported plus capabilities carry the
+// thinking vocabulary an engine publishes about itself.
 type detailsEntry struct {
 	ID          string `json:"id"`
 	AliasOf     string `json:"alias_of,omitempty"`
@@ -217,6 +239,12 @@ type detailsEntry struct {
 		InputModalities  []string `json:"input_modalities"`
 		OutputModalities []string `json:"output_modalities"`
 	} `json:"architecture"`
+	Capabilities []string `json:"capabilities"`
+	Params       struct {
+		Reasoning *struct {
+			Supported []string `json:"supported"`
+		} `json:"reasoning"`
+	} `json:"params"`
 }
 
 // pickDetailsEntry chooses which item of a multi-model listing describes this
@@ -249,8 +277,8 @@ func pickDetailsEntry(data []detailsEntry, b *Backend) *detailsEntry {
 
 // modelEntry is one item of the proxy's own GET /v1/models answer. The four
 // OpenAI fields are what the proxy has always published; the rest is what lets
-// a client decide how much context to keep and whether a picture may be sent
-// at all.
+// a client decide how much context to keep, whether a picture may be sent, and
+// which thinking level to ask for.
 type modelEntry struct {
 	ID           string         `json:"id"`
 	Object       string         `json:"object"`
@@ -259,6 +287,17 @@ type modelEntry struct {
 	Capabilities []string       `json:"capabilities,omitempty"`
 	Meta         map[string]int `json:"meta,omitempty"`
 	Architecture map[string]any `json:"architecture,omitempty"`
+	Params       map[string]any `json:"params,omitempty"`
+}
+
+// addCapability appends a capability the entry does not advertise yet.
+func addCapability(caps []string, cap string) []string {
+	for _, c := range caps {
+		if c == cap {
+			return caps
+		}
+	}
+	return append(caps, cap)
 }
 
 // buildModelEntry describes one backend for the model list. Declared
@@ -271,13 +310,14 @@ func buildModelEntry(b *Backend, id, ownedBy string, now int64, live discovered,
 		e.Capabilities = append([]string(nil), b.Capabilities...)
 	}
 	var ctxLen int
-	var inputs, outputs []string
+	var inputs, outputs, levels []string
 	if b.ModelDetails != nil {
 		if b.ModelDetails.ContextLength != nil {
 			ctxLen = int(*b.ModelDetails.ContextLength)
 		}
 		inputs = append(inputs, b.ModelDetails.InputModalities...)
 		outputs = append(outputs, b.ModelDetails.OutputModalities...)
+		levels = append(levels, b.ModelDetails.ReasoningLevels...)
 	}
 	if hasLive {
 		if ctxLen == 0 && live.ContextLength > 0 {
@@ -289,6 +329,16 @@ func buildModelEntry(b *Backend, id, ownedBy string, now int64, live discovered,
 		if len(outputs) == 0 {
 			outputs = append(outputs, live.OutputModalities...)
 		}
+		if len(levels) == 0 {
+			levels = append(levels, live.ReasoningLevels...)
+		}
+		if live.ReasoningCapability {
+			e.Capabilities = addCapability(e.Capabilities, reasoningCapability)
+		}
+	}
+	if len(levels) > 0 {
+		e.Params = map[string]any{"reasoning": map[string]any{"supported": levels}}
+		e.Capabilities = addCapability(e.Capabilities, reasoningCapability)
 	}
 	if ctxLen > 0 {
 		e.Meta = map[string]int{"n_ctx": ctxLen}

@@ -329,6 +329,12 @@ type ModelDetails struct {
 	// OutputModalities lists what a response can carry, e.g. ["text"].
 	// +optional
 	OutputModalities []string `json:"outputModalities,omitempty"`
+
+	// ReasoningLevels lists the thinking levels the backend accepts, in the
+	// endpoint's own vocabulary, e.g. ["none","low","medium","xhigh"]. Empty
+	// when it declares none.
+	// +optional
+	ReasoningLevels []string `json:"reasoningLevels,omitempty"`
 }
 
 // ExternalProvider describes an upstream LLM API outside the cluster.

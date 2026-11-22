@@ -199,6 +199,12 @@ func (r *ModelPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		}
 		if err := r.ensureReplicas(ctx, isvc, 0); err != nil {
+			if apierrors.IsConflict(err) {
+				// A member changed under this reconcile, most often the router
+				// activating it for a request. Start over with a fresh read
+				// instead of draining a member that was just asked for.
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		if len(pods) > 0 {
@@ -225,6 +231,9 @@ func (r *ModelPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			swapping = true
 		}
 		if err := r.ensureReplicas(ctx, members[owner], desired); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		if !memberReady(members[owner]) {
@@ -484,7 +493,15 @@ func (r *ModelPoolReconciler) ensureReplicas(ctx context.Context, isvc *inferenc
 	}
 	patched := isvc.DeepCopy()
 	patched.Spec.Replicas = ptr.To(desired)
-	return r.Patch(ctx, patched, client.MergeFrom(isvc))
+	// spec.replicas has two writers: this reconciler, which holds members at
+	// zero or one, and the router's activator, which scales a member up when a
+	// request asks for it. Diffing against the cached read without a
+	// resourceVersion makes this an unconditional write of the value read at the
+	// top of the reconcile, so an activation that lands in between is erased and
+	// the swap never starts while the router waits out its activation budget.
+	// The optimistic lock turns that case into a conflict, which the caller
+	// retries against a fresh read.
+	return r.Patch(ctx, patched, client.MergeFromWithOptions(isvc, client.MergeFromWithOptimisticLock{}))
 }
 
 // memberNames returns the pool's member names in declaration order, giving the

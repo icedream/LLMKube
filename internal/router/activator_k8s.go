@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,35 +46,39 @@ func NewKubeMemberController(cl client.Client, pollInterval time.Duration) Membe
 }
 
 func (k *kubeMemberController) Activate(ctx context.Context, namespace, isvc string) error {
-	cur := &inferencev1alpha1.InferenceService{}
-	if err := k.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: isvc}, cur); err != nil {
-		return fmt.Errorf("get member %s/%s: %w", namespace, isvc, err)
-	}
-	if cur.Spec.Replicas != nil && *cur.Spec.Replicas >= 1 {
-		return nil
-	}
-	patched := cur.DeepCopy()
-	patched.Spec.Replicas = ptr.To(int32(1))
-	if err := k.client.Patch(ctx, patched, client.MergeFrom(cur)); err != nil {
-		return fmt.Errorf("scale up member %s/%s: %w", namespace, isvc, err)
-	}
-	return nil
+	return k.setReplicas(ctx, namespace, isvc, 1, func(cur int32) bool { return cur >= 1 })
 }
 
 func (k *kubeMemberController) Deactivate(ctx context.Context, namespace, isvc string) error {
-	cur := &inferencev1alpha1.InferenceService{}
-	if err := k.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: isvc}, cur); err != nil {
-		return fmt.Errorf("get member %s/%s: %w", namespace, isvc, err)
+	return k.setReplicas(ctx, namespace, isvc, 0, func(cur int32) bool { return cur == 0 })
+}
+
+// setReplicas writes spec.replicas for a member with an optimistic lock and
+// retries on conflict. The pool reconciler writes the same field, so an
+// unconditional patch from here could be overwritten by its cached diff, and
+// the activation the router is waiting on would never happen.
+func (k *kubeMemberController) setReplicas(ctx context.Context, namespace, isvc string, desired int32, already func(int32) bool) error {
+	const attempts = 5
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		cur := &inferencev1alpha1.InferenceService{}
+		if err := k.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: isvc}, cur); err != nil {
+			return fmt.Errorf("get member %s/%s: %w", namespace, isvc, err)
+		}
+		if cur.Spec.Replicas != nil && already(*cur.Spec.Replicas) {
+			return nil
+		}
+		patched := cur.DeepCopy()
+		patched.Spec.Replicas = ptr.To(desired)
+		lastErr = k.client.Patch(ctx, patched, client.MergeFromWithOptions(cur, client.MergeFromWithOptimisticLock{}))
+		if lastErr == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(lastErr) {
+			return fmt.Errorf("scale member %s/%s to %d: %w", namespace, isvc, desired, lastErr)
+		}
 	}
-	if cur.Spec.Replicas != nil && *cur.Spec.Replicas == 0 {
-		return nil
-	}
-	patched := cur.DeepCopy()
-	patched.Spec.Replicas = ptr.To(int32(0))
-	if err := k.client.Patch(ctx, patched, client.MergeFrom(cur)); err != nil {
-		return fmt.Errorf("scale down member %s/%s: %w", namespace, isvc, err)
-	}
-	return nil
+	return fmt.Errorf("scale member %s/%s to %d: %w", namespace, isvc, desired, lastErr)
 }
 
 func (k *kubeMemberController) WaitReady(ctx context.Context, namespace, isvc string) error {
@@ -101,4 +106,12 @@ func (k *kubeMemberController) Phase(ctx context.Context, namespace, isvc string
 		return "", fmt.Errorf("get member %s/%s: %w", namespace, isvc, err)
 	}
 	return cur.Status.Phase, nil
+}
+
+func (k *kubeMemberController) Suspended(ctx context.Context, namespace, isvc string) (bool, error) {
+	cur := &inferencev1alpha1.InferenceService{}
+	if err := k.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: isvc}, cur); err != nil {
+		return false, fmt.Errorf("get member %s/%s: %w", namespace, isvc, err)
+	}
+	return cur.Spec.Suspend, nil
 }

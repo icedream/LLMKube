@@ -63,6 +63,12 @@ type MemberController interface {
 	// Phase returns the member InferenceService's current status.phase, used to
 	// seed which member is resident on a cold proxy start.
 	Phase(ctx context.Context, namespace, isvc string) (string, error)
+
+	// Suspended reports whether the member InferenceService is parked by
+	// spec.suspend. A suspended member can never become resident in a ModelPool
+	// (the ModelPoolReconciler excludes it from ownership), so attempting to
+	// activate one will never succeed.
+	Suspended(ctx context.Context, namespace, isvc string) (bool, error)
 }
 
 // Activator owns the cross-pod sticky swap policy for every ModelPool the proxy
@@ -347,6 +353,38 @@ func (a *Activator) startSwap(pr *poolRuntime, incumbent, target string, holdSta
 	go func() {
 		defer cancel()
 		swapStart := time.Now()
+
+		// A suspended member can never become resident (the ModelPoolReconciler
+		// excludes it from ownership). Fail the swap immediately rather than
+		// attempting an activation that will never succeed.
+		suspended, serr := a.ctrl.Suspended(swapCtx, pr.namespace, target)
+		if serr != nil {
+			a.logger.Error("failed to check if member is suspended",
+				"pool", pr.pool, "member", target, "error", serr)
+			// Treat the error as a swap failure; the caller will retry later.
+			serr = fmt.Errorf("check suspended for %s: %w", target, serr)
+		} else if suspended {
+			serr = fmt.Errorf("member %s is suspended; cannot activate", target)
+		}
+		if serr != nil {
+			a.mu.Lock()
+			if pr.swapGen != gen {
+				pr.notify()
+				a.mu.Unlock()
+				return
+			}
+			pr.swapping = false
+			pr.swapTarget = ""
+			a.logger.Error("model pool swap aborted: suspended member",
+				"pool", pr.pool, "target", target, "error", serr)
+			prommetrics.ModelPoolSwapFailuresTotal.
+				WithLabelValues(a.router, pr.pool, target, "suspended").Inc()
+			pr.swapErr[target] = swapFailure{gen: gen, err: serr}
+			pr.notify()
+			a.mu.Unlock()
+			return
+		}
+
 		err := a.ctrl.Activate(swapCtx, pr.namespace, target)
 		if err == nil {
 			err = a.ctrl.WaitReady(swapCtx, pr.namespace, target)

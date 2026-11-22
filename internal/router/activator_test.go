@@ -43,6 +43,8 @@ type fakeMemberController struct {
 	// phaseErr, when non-nil for a member, makes WaitReady fail with it after
 	// waitFor long, the way a failed API read does after the scale-up patched.
 	phaseErr map[string]error
+	// suspended mirrors the member InferenceService's spec.suspend.
+	suspended map[string]bool
 }
 
 func newFakeMemberController() *fakeMemberController {
@@ -53,6 +55,7 @@ func newFakeMemberController() *fakeMemberController {
 		activateFail: make(map[string]bool),
 		replicas:     make(map[string]int),
 		phaseErr:     make(map[string]error),
+		suspended:    make(map[string]bool),
 	}
 }
 
@@ -60,6 +63,12 @@ func (f *fakeMemberController) setPhase(name, phase string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.phase[name] = phase
+}
+
+func (f *fakeMemberController) setSuspended(name string, suspended bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.suspended[name] = suspended
 }
 
 func (f *fakeMemberController) activateCount(name string) int {
@@ -147,6 +156,12 @@ func (f *fakeMemberController) Phase(ctx context.Context, namespace, isvc string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.phase[isvc], nil
+}
+
+func (f *fakeMemberController) Suspended(ctx context.Context, namespace, isvc string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.suspended[isvc], nil
 }
 
 func testPool(member string) *BackendPool {
